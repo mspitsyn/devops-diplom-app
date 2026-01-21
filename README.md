@@ -1,1 +1,2 @@
-# devops-diplom-app
+# devops-diplom-app  
+Тестовое приложение содержит статичную `HTML-страницу` и `Dockerfile` с nginx, который будет отдавать статические данные html-страницы.
