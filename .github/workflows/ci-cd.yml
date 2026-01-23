@@ -10,7 +10,7 @@ on:
 env:
   IMAGE_TAG: mspitsyn/devops-diplom-app
   RELEASE_NAME: diplom-app
-  NAMESPACE: deploy-app
+  NAMESPACE: diplom-app
 
 jobs:
   build-and-push:
