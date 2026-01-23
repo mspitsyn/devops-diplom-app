@@ -85,4 +85,4 @@ jobs:
           echo "${KUBECONFIG}" > ${HOME}/.kube/config
       - name: Apply Kubernetes manifests
         run: |
-          kubectl apply -f ./deployment-svc.yaml
+          kubectl apply -f ./deployment-svc.yaml -n diplom-app
