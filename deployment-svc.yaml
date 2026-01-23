@@ -19,7 +19,7 @@ spec:
     spec:
       containers:
       - name: diplom-test-app
-        image: mspitsyn/devops-diplom-app:0.1
+        image: mspitsyn/devops-diplom-app
         resources:
           requests:
             cpu: "1"
