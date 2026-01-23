@@ -71,7 +71,7 @@ jobs:
         if: env.DEPLOY == 'false'
        
         run: |
-          sed -i "s|image: mspitsyn/devops-diplom-app:.*|image: ${{ env.IMAGE_TAG }}|" ./deployment.yaml
+          sed -i "s|image: mspitsyn/devops-diplom-app:.*|image: ${{ env.IMAGE_TAG }}|" ./deployment-svc.yaml
         env:
           IMAGE_TAG: mspitsyn/devops-diplom-app:${{ env.VERSION }}
       
