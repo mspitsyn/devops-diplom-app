@@ -1,0 +1,137 @@
+name: diplom-app
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+
+env:
+  IMAGE_NAME: mspitsyn/devops-diplom-app
+  RELEASE_NAME: diplom-app
+  NAMESPACE: diplom-app
+
+jobs:
+  build-and-push:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.extract-version.outputs.VERSION }}
+      short-sha: ${{ steps.get-short-sha.outputs.SHORT_SHA }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Get short commit SHA
+        id: get-short-sha
+        run: |
+          echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+      
+      - name: Extract version
+        id: extract-version
+        run: |
+          # Ищем версию в теге или коммите
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+          else
+            # Используем семантическую версию из файла или генерируем
+            # Если есть файл version.txt, берем оттуда
+            if [ -f "version.txt" ]; then
+              VERSION=$(cat version.txt)
+            else
+              # Используем дату и короткий хэш коммита
+              DATE=$(date +'%Y%m%d')
+              VERSION="${DATE}-${SHORT_SHA}"
+            fi
+          fi
+          echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
+          echo "IMAGE_TAG=${IMAGE_NAME}:${VERSION}" >> $GITHUB_OUTPUT
+        env:
+          SHORT_SHA: ${{ steps.get-short-sha.outputs.SHORT_SHA }}
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+      
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ steps.extract-version.outputs.VERSION }}
+            ${{ env.IMAGE_NAME }}:latest
+          cache-from: type=registry,ref=${{ env.IMAGE_NAME }}:latest
+          cache-to: type=inline
+
+  deploy:
+    name: Deploy to Kubernetes
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    environment: production
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'latest'
+      
+      - name: Setup Kubernetes context
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+      
+      - name: Create namespace if not exists
+        run: |
+          kubectl create namespace ${{ env.NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
+      
+      - name: Update deployment manifest with new image
+        run: |
+          # Создаем временный файл с новым образом
+          IMAGE_TAG="${{ env.IMAGE_NAME }}:${{ needs.build-and-push.outputs.version }}"
+          echo "Using image tag: $IMAGE_TAG"
+          
+          # Обновляем образ в манифесте
+          sed -i "s|image: ${{ env.IMAGE_NAME }}:.*|image: $IMAGE_TAG|" ./deployment-svc.yaml
+          
+          # Добавляем аннотацию с timestamp для принудительного обновления
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          sed -i "/spec:/a\  template:\n    metadata:\n      annotations:\n        kubectl.kubernetes.io/restartedAt: \"$TIMESTAMP\"" ./deployment-svc.yaml
+      
+      - name: Apply Kubernetes manifests
+        run: |
+          echo "Applying deployment..."
+          kubectl apply -f ./deployment-svc.yaml -n ${{ env.NAMESPACE }}
+      
+      - name: Restart deployment to force update
+        run: |
+          # Принудительно перезапускаем деплоймент для гарантированного обновления подов
+          kubectl rollout restart deployment/diplom-app -n ${{ env.NAMESPACE }}
+      
+      - name: Wait for rollout to complete
+        run: |
+          kubectl rollout status deployment/diplom-app -n ${{ env.NAMESPACE }} --timeout=300s
+      
+      - name: Verify deployment
+        run: |
+          echo "Current pods:"
+          kubectl get pods -n ${{ env.NAMESPACE }} -l app=web-app
+          
+          echo "Deployment details:"
+          kubectl describe deployment diplom-app -n ${{ env.NAMESPACE }}
+          
+          echo "Current image:"
+          kubectl get deployment diplom-app -n ${{ env.NAMESPACE }} -o jsonpath='{.spec.template.spec.containers[0].image}'
