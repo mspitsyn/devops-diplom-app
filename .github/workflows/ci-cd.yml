@@ -67,13 +67,13 @@ jobs:
             exit 1
           fi
 
-      - name: Replace image tag in deployment.yaml
-        if: env.DEPLOY == 'false'
+      - name: Replace image tag in deployment-svc.yaml
+        if: env.DEPLOY == 'true'
        
         run: |
           sed -i "s|image: mspitsyn/devops-diplom-app:.*|image: ${{ env.IMAGE_TAG }}|" ./deployment-svc.yaml
         env:
-          IMAGE_TAG: mspitsyn/devops-diplom-app:${{ env.VERSION }}
+          IMAGE_TAG: mspitsyn/devops-diplom-app:${{ env.IMAGE_TAG }}
       
       - name: Create kubeconfig
         run: |
