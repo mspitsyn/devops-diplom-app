@@ -13,44 +13,57 @@ env:
   NAMESPACE: diplom-app
 
 jobs:
-  build-and-push:
-    name: Build and Push Docker Image
+  version-determine:
+    name: Determine Version
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.extract-version.outputs.VERSION }}
-      short-sha: ${{ steps.get-short-sha.outputs.SHORT_SHA }}
+      version: ${{ steps.determine-version.outputs.VERSION }}
+      image_tag: ${{ steps.determine-version.outputs.IMAGE_TAG }}
     
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Полный history для тегов
       
-      - name: Get short commit SHA
-        id: get-short-sha
+      - name: Determine version
+        id: determine-version
         run: |
-          echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-      
-      - name: Extract version
-        id: extract-version
-        run: |
-          # Ищем версию в теге или коммите
+          # Если это тег - используем имя тега (без 'v')
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            VERSION=${GITHUB_REF#refs/tags/}
-          else
-            # Используем семантическую версию из файла или генерируем
-            # Если есть файл version.txt, берем оттуда
-            if [ -f "version.txt" ]; then
-              VERSION=$(cat version.txt)
-            else
-              # Используем дату и короткий хэш коммита
-              DATE=$(date +'%Y%m%d')
-              VERSION="${DATE}-${SHORT_SHA}"
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          # Если это коммит в main - используем последний тег или SHA
+          elif [[ "${GITHUB_REF}" == refs/heads/main ]]; then
+            # Пробуем получить последний тег
+            LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+            
+            if [[ -n "$LATEST_TAG" && "$LATEST_TAG" == v* ]]; then
+              # Инкрементируем патч версию последнего тега
+              BASE_VERSION="${LATEST_TAG#v}"
+              IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE_VERSION"
+              PATCH=$((PATCH + 1))
+              VERSION="${MAJOR}.${MINOR}.${PATCH}"
             fi
+          else
+            # Для других веток - используем SHA
+            SHORT_SHA=$(git rev-parse --short HEAD)
+            VERSION="${SHORT_SHA}"
           fi
+          
           echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
           echo "IMAGE_TAG=${IMAGE_NAME}:${VERSION}" >> $GITHUB_OUTPUT
+          echo "Determined version: ${VERSION}"
         env:
-          SHORT_SHA: ${{ steps.get-short-sha.outputs.SHORT_SHA }}
           IMAGE_NAME: ${{ env.IMAGE_NAME }}
+
+  build-and-push:
+    name: Build and Push Docker Image
+    needs: version-determine
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
       
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -67,22 +80,19 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
-          tags: |
-            ${{ env.IMAGE_NAME }}:${{ steps.extract-version.outputs.VERSION }}
-            ${{ env.IMAGE_NAME }}:latest
-          cache-from: type=registry,ref=${{ env.IMAGE_NAME }}:latest
-          cache-to: type=inline
+          tags: ${{ needs.version-determine.outputs.image_tag }}
+          labels: |
+            version=${{ needs.version-determine.outputs.version }}
+            build.date=${{ github.event.head_commit.timestamp }}
 
   deploy:
     name: Deploy to Kubernetes
-    needs: build-and-push
+    needs: 
+      - version-determine
+      - build-and-push
     runs-on: ubuntu-latest
-    environment: production
     
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      
       - name: Setup kubectl
         uses: azure/setup-kubectl@v4
         with:
@@ -98,28 +108,13 @@ jobs:
         run: |
           kubectl create namespace ${{ env.NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
       
-      - name: Update deployment manifest with new image
+      - name: Update deployment with new image
         run: |
-          # Создаем временный файл с новым образом
-          IMAGE_TAG="${{ env.IMAGE_NAME }}:${{ needs.build-and-push.outputs.version }}"
-          echo "Using image tag: $IMAGE_TAG"
+          IMAGE_TAG="${{ needs.version-determine.outputs.image_tag }}"
+          echo "Updating deployment with image: $IMAGE_TAG"
           
-          # Обновляем образ в манифесте
-          sed -i "s|image: ${{ env.IMAGE_NAME }}:.*|image: $IMAGE_TAG|" ./deployment-svc.yaml
-          
-          # Добавляем аннотацию с timestamp для принудительного обновления
-          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          sed -i "/spec:/a\  template:\n    metadata:\n      annotations:\n        kubectl.kubernetes.io/restartedAt: \"$TIMESTAMP\"" ./deployment-svc.yaml
-      
-      - name: Apply Kubernetes manifests
-        run: |
-          echo "Applying deployment..."
-          kubectl apply -f ./deployment-svc.yaml -n ${{ env.NAMESPACE }}
-      
-      - name: Restart deployment to force update
-        run: |
-          # Принудительно перезапускаем деплоймент для гарантированного обновления подов
-          kubectl rollout restart deployment/diplom-app -n ${{ env.NAMESPACE }}
+          # Обновляем образ в deployment
+          kubectl set image deployment/diplom-app diplom-test-app=$IMAGE_TAG -n ${{ env.NAMESPACE }}
       
       - name: Wait for rollout to complete
         run: |
@@ -127,11 +122,12 @@ jobs:
       
       - name: Verify deployment
         run: |
-          echo "Current pods:"
-          kubectl get pods -n ${{ env.NAMESPACE }} -l app=web-app
+          echo "=== Current pods ==="
+          kubectl get pods -n ${{ env.NAMESPACE }} -l app=web-app -o wide
           
-          echo "Deployment details:"
-          kubectl describe deployment diplom-app -n ${{ env.NAMESPACE }}
-          
-          echo "Current image:"
+          echo -e "\n=== Current image in deployment ==="
           kubectl get deployment diplom-app -n ${{ env.NAMESPACE }} -o jsonpath='{.spec.template.spec.containers[0].image}'
+          echo ""
+          
+          echo -e "\n=== Pod images ==="
+          kubectl get pods -n ${{ env.NAMESPACE }} -l app=web-app -o jsonpath='{range .items[*]}{.metadata.name}: {.spec.containers[0].image}{"\n"}{end}'
