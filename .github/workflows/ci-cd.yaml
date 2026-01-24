@@ -8,114 +8,86 @@ on:
       - 'v*'
 
 env:
-  IMAGE_NAME: mspitsyn/devops-diplom-app
+  IMAGE_TAG: mspitsyn/devops-diplom-app
   RELEASE_NAME: diplom-app
   NAMESPACE: diplom-app
+  APP: web-app
 
 jobs:
-  version-determine:
-    name: Determine Version
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.determine-version.outputs.VERSION }}
-      image_tag: ${{ steps.determine-version.outputs.IMAGE_TAG }}
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # Полный history для тегов
-      
-      - name: Determine version
-        id: determine-version
-        run: |
-          # Если это тег - используем имя тега (без 'v')
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            VERSION="${GITHUB_REF#refs/tags/v}"
-          # Если это коммит в main - используем последний тег или SHA
-          elif [[ "${GITHUB_REF}" == refs/heads/main ]]; then
-            # Пробуем получить последний тег
-            LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-            
-            if [[ -n "$LATEST_TAG" && "$LATEST_TAG" == v* ]]; then
-              # Инкрементируем патч версию последнего тега
-              BASE_VERSION="${LATEST_TAG#v}"
-              IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE_VERSION"
-              PATCH=$((PATCH + 1))
-              VERSION="${MAJOR}.${MINOR}.${PATCH}"
-            fi
-          else
-            # Для других веток - используем SHA
-            SHORT_SHA=$(git rev-parse --short HEAD)
-            VERSION="${SHORT_SHA}"
-          fi
-          
-          echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
-          echo "IMAGE_TAG=${IMAGE_NAME}:${VERSION}" >> $GITHUB_OUTPUT
-          echo "Determined version: ${VERSION}"
-        env:
-          IMAGE_NAME: ${{ env.IMAGE_NAME }}
-
   build-and-push:
-    name: Build and Push Docker Image
-    needs: version-determine
+    name: Build Docker image
     runs-on: ubuntu-latest
-    
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
-      
-      - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      
-      - name: Build and push Docker image
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Extract version from commit messages
+        run: |
+          VERSION=$(git log -1 --pretty=format:%s | grep -oP 'v\d+\.\d+\.\d+')
+          if [[ ! -z "$VERSION" ]]; then
+            echo "VERSION=$VERSION" >> $GITHUB_ENV
+          else
+            echo "No version found in the commit message"
+            exit 1
+          fi
+      - name: Build and push
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./Dockerfile
           push: true
-          tags: ${{ needs.version-determine.outputs.image_tag }}
-          labels: |
-            version=${{ needs.version-determine.outputs.version }}
-            build.date=${{ github.event.head_commit.timestamp }}
+          tags: ${{ env.IMAGE_TAG }}:${{ env.VERSION }}
 
   deploy:
+    needs: build-and-push
     name: Deploy to Kubernetes
-    needs: 
-      - version-determine
-      - build-and-push
+    if: startsWith(github.ref, 'refs/heads/main') || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    
     steps:
-      - name: Setup kubectl
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Kubernetes
         uses: azure/setup-kubectl@v4
         with:
-          version: '1.31.0'
-      
-      - name: Setup Kubernetes context
-        uses: azure/k8s-set-context@v4
-        with:
-          method: kubeconfig
-          kubeconfig: ${{ secrets.KUBECONFIG }}
-      
-      - name: Create namespace if not exists
+          version: 'v1.31.0'
+
+      - name: Extract version from commit messages
         run: |
-          kubectl create namespace ${{ env.NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
-      
-      - name: Update deployment with new image
+          VERSION=$(git log -1 --pretty=format:%B)
+          if [[ ! -z "$VERSION" ]]; then
+            echo "VERSION=$VERSION" >> $GITHUB_ENV
+          else
+            echo "No version found in the commit message"
+            exit 1
+          fi
+
+      - name: Replace image tag in deployment-svc.yaml
+        if: env.DEPLOY == 'true'
+       
         run: |
-          IMAGE_TAG="${{ needs.version-determine.outputs.image_tag }}"
-          echo "Updating deployment with image: $IMAGE_TAG"
-          
-          # Обновляем образ в deployment
-          kubectl set image deployment/diplom-app diplom-test-app=$IMAGE_TAG -n ${{ env.NAMESPACE }}
+          sed -i "s|image: mspitsyn/devops-diplom-app:.*|image: ${{ env.VERSION }}|" ./deployment-svc.yaml
+        env:
+          IMAGE_TAG: mspitsyn/devops-diplom-app:${{ env.VERSION }}
       
+      - name: Create kubeconfig
+        run: |
+          mkdir -p $HOME/.kube/
+      - name: Authenticate to Kubernetes cluster
+        env:
+          KUBECONFIG: ${{ secrets.KUBECONFIG }}
+        run: |
+          echo "${KUBECONFIG}" > ${HOME}/.kube/config
+      - name: Apply Kubernetes manifests
+        run: |
+          kubectl apply -f ./deployment-svc.yaml -n ${{ env.NAMESPACE }}
+          kubectl delete pods -l app=${{ env.APP }} -n ${{ env.NAMESPACE }}
       - name: Wait for rollout to complete
         run: |
           kubectl rollout status deployment/diplom-app -n ${{ env.NAMESPACE }} --timeout=300s
@@ -123,11 +95,4 @@ jobs:
       - name: Verify deployment
         run: |
           echo "=== Current pods ==="
-          kubectl get pods -n ${{ env.NAMESPACE }} -l app=web-app -o wide
-          
-          echo -e "\n=== Current image in deployment ==="
-          kubectl get deployment diplom-app -n ${{ env.NAMESPACE }} -o jsonpath='{.spec.template.spec.containers[0].image}'
-          echo ""
-          
-          echo -e "\n=== Pod images ==="
-          kubectl get pods -n ${{ env.NAMESPACE }} -l app=web-app -o jsonpath='{range .items[*]}{.metadata.name}: {.spec.containers[0].image}{"\n"}{end}'
+          kubectl get pods -n ${{ env.NAMESPACE }} -l app=${{ env.APP }} -o wide
