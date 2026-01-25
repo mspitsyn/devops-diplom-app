@@ -9,10 +9,8 @@ on:
 
 env:
   IMAGE_NAME: mspitsyn/devops-diplom-app
-  RELEASE_NAME: diplom-app
   NAMESPACE: diplom-app
-  APP: web-app
-  DEPLOY: true
+
 
 jobs:
   build-and-push:
