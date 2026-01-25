@@ -91,44 +91,12 @@ jobs:
       
       - name: Update deployment with new image
         run: |
-
-          # Проверяем существование deployment
-          if ! kubectl get deployment diplom-app -n ${{ env.NAMESPACE }} &>/dev/null; then
-            echo "Deployment not found, creating from manifest..."
-            kubectl apply -f ./deployment-svc.yaml -n ${{ env.NAMESPACE }}
-            exit 0
-          fi
-          
-          # Для безопасности уменьшаем до 1 реплики
-          kubectl scale deployment diplom-app --replicas=1 -n ${{ env.NAMESPACE }} || true
-          sleep 5
-          
           # Обновляем образ
           kubectl set image deployment/diplom-app diplom-test-app=$IMAGE_TAG -n ${{ env.NAMESPACE }}
           
           # Ждем обновления
           kubectl rollout status deployment/diplom-app -n ${{ env.NAMESPACE }} --timeout=180s || true
-      
-      - name: Wait for all pods to be ready
-        run: |
-          # Ждем готовности 1 реплики
-          timeout=180
-          end=$((SECONDS+timeout))
           
-          while [ $SECONDS -lt $end ]; do
-            ready=$(kubectl get deployment diplom-app -n ${{ env.NAMESPACE }} -o jsonpath='{.status.readyReplicas}')
-            [ "$ready" = "1" ] && break
-            echo "Waiting for pod to be ready... (ready: ${ready:-0}/1)"
-            sleep 5
-          done
-          
-          if [ "$ready" != "1" ]; then
-            echo "Deployment failed to become ready within $timeout seconds"
-            kubectl describe deployment diplom-app -n ${{ env.NAMESPACE }}
-            kubectl get events -n ${{ env.NAMESPACE }}
-            exit 1
-          fi
-      
       - name: Verify deployment
         run: |
           echo "=== Current pods ==="
