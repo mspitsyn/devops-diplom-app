@@ -40,7 +40,7 @@ jobs:
           DATE=$(date +'%Y%m%d')
           VERSION="${DATE}-${SHORT_SHA}"
           echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
-          IMAGE_TAG=${IMG_NAME}:${VERSION}
+          IMAGE_TAG="${IMAGE_NAME}:${VERSION}"
           echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_OUTPUT
           echo "Generated image tag: ${IMAGE_TAG}"
       
@@ -80,7 +80,7 @@ jobs:
           DATE=$(date +'%Y%m%d')
           VERSION="${DATE}-${SHORT_SHA}"
           echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
-          IMAGE_TAG=${IMG_NAME}:${VERSION}
+          IMAGE_TAG=${IMAGE_NAME}:${VERSION}
           echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_OUTPUT
           echo "Generated image tag: ${IMAGE_TAG}"
       
@@ -91,12 +91,7 @@ jobs:
       
       - name: Update deployment with new image
         run: |
-          # Проверяем тег
-          if [ -z "$IMAGE_TAG" ]; then
-            echo "ERROR: IMAGE_TAG is empty!"
-            exit 1
-          fi
-          
+
           # Проверяем существование deployment
           if ! kubectl get deployment diplom-app -n ${{ env.NAMESPACE }} &>/dev/null; then
             echo "Deployment not found, creating from manifest..."
