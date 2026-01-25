@@ -11,21 +11,26 @@ env:
   IMAGE_NAME: mspitsyn/devops-diplom-app
   NAMESPACE: diplom-app
 
-
 jobs:
   build-and-push:
     name: Build Docker image
     runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.version.outputs.IMAGE_TAG }}
+    
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+      
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+      
       - name: Generate version tag
         id: version
         run: |
@@ -47,8 +52,8 @@ jobs:
   deploy:
     needs: build-and-push
     name: Deploy to Kubernetes
-    if: startsWith(github.ref, 'refs/heads/main') || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -56,41 +61,73 @@ jobs:
       - name: Set up Kubernetes
         uses: azure/setup-kubectl@v4
         with:
-          version: 'v1.31.0'    
-      - name: Create kubeconfig
-        run: |
-          mkdir -p $HOME/.kube/
+          version: 'v1.31.0'
+      
       - name: Authenticate to Kubernetes cluster
-        env:
-          KUBECONFIG: ${{ secrets.KUBECONFIG }}
         run: |
-          echo "${KUBECONFIG}" > ~/.kube/config
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG }}" > ~/.kube/config
+          chmod 600 ~/.kube/config
+      
       - name: Clean up stuck pods
         run: |
           # Удаляем все поды в статусе Pending или Error
-          kubectl get pods -n ${{ env.NAMESPACE }} --field-selector=status.phase!=Running -o name | xargs -r kubectl delete -n ${{ env.NAMESPACE }}
+          kubectl get pods -n ${{ env.NAMESPACE }} --field-selector=status.phase!=Running -o name | xargs -r kubectl delete -n ${{ env.NAMESPACE }} 2>/dev/null || true
+      
       - name: Update deployment with new image
         run: |
-          # Сначала уменьшим количество реплик для безопасного обновления
-          kubectl scale deployment diplom-app --replicas=1 -n ${{ env.NAMESPACE }}
+          # Получаем тег образа из предыдущего job
+          IMAGE_TAG="${{ needs.build-and-push.outputs.image_tag }}"
+          echo "Updating deployment with image: $IMAGE_TAG"
           
-          # Дадим время на остановку лишних подов
-          sleep 10
+          # Проверяем существование deployment
+          if ! kubectl get deployment diplom-app -n ${{ env.NAMESPACE }} &>/dev/null; then
+            echo "Deployment not found, creating from manifest..."
+            kubectl apply -f ./deployment-svc.yaml -n ${{ env.NAMESPACE }}
+            exit 0
+          fi
+          
+          # Для безопасности уменьшаем до 1 реплики
+          kubectl scale deployment diplom-app --replicas=1 -n ${{ env.NAMESPACE }} || true
+          sleep 5
           
           # Обновляем образ
           kubectl set image deployment/diplom-app diplom-test-app=$IMAGE_TAG -n ${{ env.NAMESPACE }}
           
-          # Ждем обновления одной реплики
-          kubectl rollout status deployment/diplom-app -n ${{ env.NAMESPACE }} --timeout=180s
+          # Ждем обновления
+          kubectl rollout status deployment/diplom-app -n ${{ env.NAMESPACE }} --timeout=180s || true
           
-          # Возвращаем нужное количество реплик
-          kubectl scale deployment diplom-app --replicas=2 -n ${{ env.NAMESPACE }}
+          # Не возвращаем 2 реплики - оставляем 1 из-за нехватки ресурсов
+          # kubectl scale deployment diplom-app --replicas=2 -n ${{ env.NAMESPACE }}
       
       - name: Wait for all pods to be ready
         run: |
-          kubectl rollout status deployment/diplom-app -n ${{ env.NAMESPACE }} --timeout=300s
+          # Ждем готовности 1 реплики
+          timeout=180
+          end=$((SECONDS+timeout))
+          
+          while [ $SECONDS -lt $end ]; do
+            ready=$(kubectl get deployment diplom-app -n ${{ env.NAMESPACE }} -o jsonpath='{.status.readyReplicas}')
+            [ "$ready" = "1" ] && break
+            echo "Waiting for pod to be ready... (ready: ${ready:-0}/1)"
+            sleep 5
+          done
+          
+          if [ "$ready" != "1" ]; then
+            echo "Deployment failed to become ready within $timeout seconds"
+            kubectl describe deployment diplom-app -n ${{ env.NAMESPACE }}
+            kubectl get events -n ${{ env.NAMESPACE }}
+            exit 1
+          fi
       
       - name: Verify deployment
         run: |
           echo "=== Current pods ==="
           kubectl get pods -n ${{ env.NAMESPACE }} -l app=web-app -o wide
+          
+          echo -e "\n=== Current image ==="
+          kubectl get deployment diplom-app -n ${{ env.NAMESPACE }} -o jsonpath='{.spec.template.spec.containers[0].image}'
+          echo ""
+          
+          echo "=== Pod status ==="
+          kubectl get pods -n ${{ env.NAMESPACE }} -l app=web-app -o jsonpath='{range .items[*]}{.metadata.name}: {.status.phase}{"\n"}{end}'
