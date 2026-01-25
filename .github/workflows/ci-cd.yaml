@@ -33,13 +33,16 @@ jobs:
       
       - name: Generate version tag
         id: version
+        env:
+          IMG_NAME: ${{ env.IMAGE_NAME }}
         run: |
           SHORT_SHA=$(git rev-parse --short HEAD)
           DATE=$(date +'%Y%m%d')
           VERSION="${DATE}-${SHORT_SHA}"
           echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
-          IMAGE_TAG=${{ env.IMAGE_NAME }}:${VERSION}
-          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          IMAGE_TAG=${IMG_NAME}:${VERSION}
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+          echo "Generated image tag: ${IMAGE_TAG}"
       
       - name: Build and push
         uses: docker/build-push-action@v5
@@ -69,6 +72,11 @@ jobs:
           echo "${{ secrets.KUBECONFIG }}" > ~/.kube/config
           chmod 600 ~/.kube/config
       
+      - name: Debug outputs
+        run: |
+          echo "build-and-push outputs: ${{ toJSON(needs.build-and-push.outputs) }}"
+          echo "image_tag: ${{ needs.build-and-push.outputs.image_tag }}"
+      
       - name: Clean up stuck pods
         run: |
           # Удаляем все поды в статусе Pending или Error
@@ -79,6 +87,11 @@ jobs:
           # Получаем тег образа из предыдущего job
           IMAGE_TAG="${{ needs.build-and-push.outputs.image_tag }}"
           echo "Updating deployment with image: $IMAGE_TAG"
+          
+          if [ -z "$IMAGE_TAG" ]; then
+            echo "ERROR: IMAGE_TAG is empty!"
+            exit 1
+          fi
           
           # Проверяем существование deployment
           if ! kubectl get deployment diplom-app -n ${{ env.NAMESPACE }} &>/dev/null; then
@@ -96,9 +109,6 @@ jobs:
           
           # Ждем обновления
           kubectl rollout status deployment/diplom-app -n ${{ env.NAMESPACE }} --timeout=180s || true
-          
-          # Не возвращаем 2 реплики - оставляем 1 из-за нехватки ресурсов
-          # kubectl scale deployment diplom-app --replicas=2 -n ${{ env.NAMESPACE }}
       
       - name: Wait for all pods to be ready
         run: |

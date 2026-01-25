@@ -6,7 +6,7 @@ metadata:
   labels:
     app: web-app
 spec:
-  replicas: 2
+  replicas: 1 
   selector:
     matchLabels:
       app: web-app
@@ -24,28 +24,30 @@ spec:
       - name: diplom-test-app
         # Тег будет заменен через kubectl set image
         image: mspitsyn/devops-diplom-app:v1.0.12
-        imagePullPolicy: Always  # Ключевая настройка!
+        imagePullPolicy: Always
         resources:
           requests:
-            cpu: "50m"     # 0.05 CPU (50 милли CPU)
-            memory: "50Mi" # 50 MB
+            cpu: "20m"
+            memory: "30Mi" 
           limits:
-            cpu: "100m"    # 0.1 CPU
-            memory: "100Mi" # 100 MB
+            cpu: "50m"
+            memory: "50Mi"
         ports:
         - containerPort: 80
         readinessProbe:
           httpGet:
             path: /
             port: 80
-          initialDelaySeconds: 5
-          periodSeconds: 5
+          initialDelaySeconds: 30  
+          periodSeconds: 10
+          failureThreshold: 3
         livenessProbe:
           httpGet:
             path: /
             port: 80
-          initialDelaySeconds: 15
-          periodSeconds: 10
+          initialDelaySeconds: 60
+          periodSeconds: 20
+          failureThreshold: 3
 
 ---
 apiVersion: v1
