@@ -89,13 +89,14 @@ jobs:
           # Удаляем все поды в статусе Pending или Error
           kubectl get pods -n ${{ env.NAMESPACE }} --field-selector=status.phase!=Running -o name | xargs -r kubectl delete -n ${{ env.NAMESPACE }} 2>/dev/null || true
       
-      - name: Update deployment with new image
+      - name: Replace image tag in deployment-svc.yaml
         run: |
           # Обновляем образ
-          kubectl set image deployment/diplom-app diplom-test-app=$IMAGE_TAG -n ${{ env.NAMESPACE }}
+          sed -i "s|image: {{ env.IMAGE_NAME }}:.*|image: $IMAGE_TAG|" ./deployment-svc.yaml
           
-          # Ждем обновления
-          kubectl rollout status deployment/diplom-app -n ${{ env.NAMESPACE }} --timeout=180s || true
+      - name: Apply Kubernetes manifests
+        run: |
+          kubectl apply -f ./deployment-svc.yaml
           
       - name: Verify deployment
         run: |

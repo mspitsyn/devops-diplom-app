@@ -6,7 +6,7 @@ metadata:
   labels:
     app: web-app
 spec:
-  replicas: 1 
+  replicas: 2 
   selector:
     matchLabels:
       app: web-app
@@ -23,7 +23,7 @@ spec:
       containers:
       - name: diplom-test-app
         # Тег будет заменен через kubectl set image
-        image: mspitsyn/devops-diplom-app:v1.0.12
+        image: mspitsyn/devops-diplom-app:20260125-f2abce7
         imagePullPolicy: Always
         resources:
           requests:
