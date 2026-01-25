@@ -8,10 +8,11 @@ on:
       - 'v*'
 
 env:
-  IMAGE_TAG: mspitsyn/devops-diplom-app
+  IMAGE_NAME: mspitsyn/devops-diplom-app
   RELEASE_NAME: diplom-app
   NAMESPACE: diplom-app
   APP: web-app
+  DEPLOY: true
 
 jobs:
   build-and-push:
@@ -27,22 +28,21 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-      - name: Extract version from commit messages
+      - name: Generate version tag
+        id: version
         run: |
-          VERSION=$(git log -1 --pretty=format:%s | grep -oP 'v\d+\.\d+\.\d+')
-          if [[ ! -z "$VERSION" ]]; then
-            echo "VERSION=$VERSION" >> $GITHUB_ENV
-          else
-            echo "No version found in the commit message"
-            exit 1
-          fi
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          DATE=$(date +'%Y%m%d')
+          VERSION="${DATE}-${SHORT_SHA}"
+          echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
+          echo "IMAGE_TAG=${IMAGE_NAME}:${VERSION}" >> $GITHUB_OUTPUT
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./Dockerfile
           push: true
-          tags: ${{ env.IMAGE_TAG }}:${{ env.VERSION }}
+          tags: ${IMAGE_TAG}
 
   deploy:
     needs: build-and-push
@@ -56,26 +56,7 @@ jobs:
       - name: Set up Kubernetes
         uses: azure/setup-kubectl@v4
         with:
-          version: 'v1.31.0'
-
-      - name: Extract version from commit messages
-        run: |
-          VERSION=$(git log -1 --pretty=format:%B)
-          if [[ ! -z "$VERSION" ]]; then
-            echo "VERSION=$VERSION" >> $GITHUB_ENV
-          else
-            echo "No version found in the commit message"
-            exit 1
-          fi
-
-      - name: Replace image tag in deployment-svc.yaml
-        if: env.DEPLOY == 'true'
-       
-        run: |
-          sed -i "s|image: mspitsyn/devops-diplom-app:.*|image: ${{ env.VERSION }}|" ./deployment-svc.yaml
-        env:
-          IMAGE_TAG: mspitsyn/devops-diplom-app:${{ env.VERSION }}
-      
+          version: 'v1.31.0'    
       - name: Create kubeconfig
         run: |
           mkdir -p $HOME/.kube/
@@ -83,16 +64,33 @@ jobs:
         env:
           KUBECONFIG: ${{ secrets.KUBECONFIG }}
         run: |
-          echo "${KUBECONFIG}" > ${HOME}/.kube/config
-      - name: Apply Kubernetes manifests
+          echo "${KUBECONFIG}" > ~/.kube/config
+      - name: Clean up stuck pods
         run: |
-          kubectl apply -f ./deployment-svc.yaml -n ${{ env.NAMESPACE }}
-          kubectl delete pods -l app=${{ env.APP }} -n ${{ env.NAMESPACE }}
-      - name: Wait for rollout to complete
+          # Удаляем все поды в статусе Pending или Error
+          kubectl get pods -n ${{ env.NAMESPACE }} --field-selector=status.phase!=Running -o name | xargs -r kubectl delete -n ${{ env.NAMESPACE }}
+      - name: Update deployment with new image
+        run: |
+          # Сначала уменьшим количество реплик для безопасного обновления
+          kubectl scale deployment diplom-app --replicas=1 -n ${{ env.NAMESPACE }}
+          
+          # Дадим время на остановку лишних подов
+          sleep 10
+          
+          # Обновляем образ
+          kubectl set image deployment/diplom-app diplom-test-app=$IMAGE_TAG -n ${{ env.NAMESPACE }}
+          
+          # Ждем обновления одной реплики
+          kubectl rollout status deployment/diplom-app -n ${{ env.NAMESPACE }} --timeout=180s
+          
+          # Возвращаем нужное количество реплик
+          kubectl scale deployment diplom-app --replicas=2 -n ${{ env.NAMESPACE }}
+      
+      - name: Wait for all pods to be ready
         run: |
           kubectl rollout status deployment/diplom-app -n ${{ env.NAMESPACE }} --timeout=300s
       
       - name: Verify deployment
         run: |
           echo "=== Current pods ==="
-          kubectl get pods -n ${{ env.NAMESPACE }} -l app=${{ env.APP }} -o wide
+          kubectl get pods -n ${{ env.NAMESPACE }} -l app=web-app -o wide

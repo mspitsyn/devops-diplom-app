@@ -23,15 +23,15 @@ spec:
       containers:
       - name: diplom-test-app
         # Тег будет заменен через kubectl set image
-        image: mspitsyn/devops-diplom-app:latest
+        image: mspitsyn/devops-diplom-app:v1.0.12
         imagePullPolicy: Always  # Ключевая настройка!
         resources:
           requests:
-            cpu: "1"
-            memory: "200Mi"
+            cpu: "50m"     # 0.05 CPU (50 милли CPU)
+            memory: "50Mi" # 50 MB
           limits:
-            cpu: "2"
-            memory: "400Mi"
+            cpu: "100m"    # 0.1 CPU
+            memory: "100Mi" # 100 MB
         ports:
         - containerPort: 80
         readinessProbe:
