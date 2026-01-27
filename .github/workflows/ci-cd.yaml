@@ -12,11 +12,37 @@ env:
   NAMESPACE: diplom-app
 
 jobs:
+  check-version:
+    name: Check Version
+    runs-on: ubuntu-latest
+    outputs:
+      has_version: ${{ steps.check.outputs.HAS_VERSION }}
+      version: ${{ steps.check.outputs.VERSION }}
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Check if commit has version
+        id: check
+        run: |
+          # Ищем версию формата v1.0.0 в сообщении коммита
+          VERSION=$(git log -1 --pretty=format:%s | grep -oP 'v\d+\.\d+\.\d+' || echo "")
+          
+          if [[ ! -z "$VERSION" ]]; then
+            echo "Found version in commit: $VERSION"
+            echo "HAS_VERSION=true" >> $GITHUB_OUTPUT
+            echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          else
+            echo "No version found in commit message"
+            echo "HAS_VERSION=false" >> $GITHUB_OUTPUT
+            echo "VERSION=none" >> $GITHUB_OUTPUT
+          fi
+
   build-and-push:
     name: Build Docker image
     runs-on: ubuntu-latest
-    outputs:
-      image_tag: ${{ steps.version.outputs.IMAGE_TAG }}
+    needs: check-version
     
     steps:
       - name: Checkout
@@ -31,25 +57,24 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       
-      - name: Generate version and tag
-        id: version
+      - name: Generate image tag
+        id: generate-tag
         run: |
-          # Если существует версия формата "v1.0.0" - добавляем её в тэг, если 
-          # другого формата или нет, генерируем тэг из даты и № коммита.
-          VERSION=$(git log -1 --pretty=format:%s | grep -oP 'v\d+\.\d+\.\d+')
-          if [[ ! -z "$VERSION" ]]; then
-            echo "VERSION=$VERSION"
-            IMAGE_TAG="${IMAGE_NAME}:${VERSION}"
-            echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+          # Если есть версия в коммите - используем её
+          if [[ "${{ needs.check-version.outputs.has_version }}" == "true" ]]; then
+            VERSION="${{ needs.check-version.outputs.version }}"
+            echo "Using version from commit: $VERSION"
           else
+            # Иначе генерируем тэг из даты и SHA коммита
             SHORT_SHA=$(git rev-parse --short HEAD)
             DATE=$(date +'%Y%m%d')
             VERSION="${DATE}-${SHORT_SHA}"
-            echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
-            IMAGE_TAG="${IMAGE_NAME}:${VERSION}"
-            echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_OUTPUT
-            echo "Generated image tag: ${IMAGE_TAG}"
+            echo "Generated version: $VERSION"
           fi
+          
+          IMAGE_TAG="${{ env.IMAGE_NAME }}:$VERSION"
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+          echo "Final image tag: $IMAGE_TAG"
       
       - name: Build and push
         uses: docker/build-push-action@v5
@@ -57,32 +82,19 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
-          tags: ${{ steps.version.outputs.IMAGE_TAG }}
+          tags: ${{ steps.generate-tag.outputs.IMAGE_TAG }}
 
   deploy:
-    needs: build-and-push
     name: Deploy to Kubernetes
+    needs: 
+      - check-version
+      - build-and-push
+    if: needs.check-version.outputs.has_version == 'true'
     runs-on: ubuntu-latest
     
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Сhecking version
-        env:
-          IMG_NAME: ${{ env.IMAGE_NAME }}
-        run: |
-          # Если существует версия формата "v1.0.0" - добавляем её в тэг,
-          # иначе деплой не требуется.
-          VERSION=$(git log -1 --pretty=format:%s | grep -oP 'v\d+\.\d+\.\d+')
-          if [[ ! -z "$VERSION" ]]; then
-            echo "VERSION=$VERSION" >> $GITHUB_ENV
-            IMAGE_TAG=${IMAGE_NAME}:${VERSION}
-            echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_OUTPUT
-          else
-            echo "No version found in the commit message. "
-            exit 1
-          fi
 
       - name: Set up Kubernetes
         uses: azure/setup-kubectl@v4
@@ -94,7 +106,14 @@ jobs:
           mkdir -p ~/.kube
           echo "${{ secrets.KUBECONFIG }}" > ~/.kube/config
           chmod 600 ~/.kube/config
-      
+
+      - name: Get version for deployment
+        id: get-version
+        run: |
+          VERSION="${{ needs.check-version.outputs.version }}"
+          IMAGE_TAG="${{ env.IMAGE_NAME }}:$VERSION"
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+
       - name: Clean up stuck pods
         run: |
           # Удаляем все поды в статусе Pending или Error
