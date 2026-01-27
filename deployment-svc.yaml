@@ -22,7 +22,8 @@ spec:
     spec:
       containers:
       - name: diplom-test-app
-        # Тег будет заменен через kubectl set image
+        # Тег будет заменен командой `sed` при workflow (ci-cd.yaml),
+        # если появится новая версия формата (v1.0.0) 
         image: mspitsyn/devops-diplom-app:20260125-f2abce7
         imagePullPolicy: Always
         resources:
