@@ -33,14 +33,12 @@ jobs:
       
       - name: Generate version and tag
         id: version
-        env:
-          IMG_NAME: ${{ env.IMAGE_NAME }}
         run: |
           # Если существует версия формата "v1.0.0" - добавляем её в тэг, если 
           # другого формата или нет, генерируем тэг из даты и № коммита.
           VERSION=$(git log -1 --pretty=format:%s | grep -oP 'v\d+\.\d+\.\d+')
           if [[ ! -z "$VERSION" ]]; then
-            echo "VERSION=$VERSION" >> $GITHUB_ENV
+            echo "VERSION=$VERSION"
             IMAGE_TAG="${IMAGE_NAME}:${VERSION}"
             echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_OUTPUT
           else
