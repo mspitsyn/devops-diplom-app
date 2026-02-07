@@ -12,41 +12,29 @@ env:
   NAMESPACE: diplom-app
 
 jobs:
-  check-version:
-    name: Check Version
-    runs-on: ubuntu-latest
-    outputs:
-      has_version: ${{ steps.check.outputs.HAS_VERSION }}
-      version: ${{ steps.check.outputs.VERSION }}
-    
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      
-      - name: Check if commit has version
-        id: check
-        run: |
-          # Ищем версию формата v1.0.0 в сообщении коммита
-          VERSION=$(git log -1 --pretty=format:%s | grep -oP 'v\d+\.\d+\.\d+' || echo "")
-          
-          if [[ ! -z "$VERSION" ]]; then
-            echo "Found version in commit: $VERSION"
-            echo "HAS_VERSION=true" >> $GITHUB_OUTPUT
-            echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-          else
-            echo "No version found in commit message"
-            echo "HAS_VERSION=false" >> $GITHUB_OUTPUT
-            echo "VERSION=none" >> $GITHUB_OUTPUT
-          fi
-
   build-and-push:
     name: Build Docker image
     runs-on: ubuntu-latest
-    needs: check-version
+    outputs:
+      image_tag: ${{ steps.generate-tag.outputs.IMAGE_TAG }}
+      is_tag_build: ${{ steps.check-tag.outputs.IS_TAG_BUILD }}
     
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Полная история для работы с тегами
+      
+      - name: Check if push is tag
+        id: check-tag
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "This is a tag push"
+            echo "IS_TAG_BUILD=true" >> $GITHUB_OUTPUT
+          else
+            echo "This is a branch push"
+            echo "IS_TAG_BUILD=false" >> $GITHUB_OUTPUT
+          fi
       
       - name: Login to Docker Hub
         uses: docker/login-action@v3
@@ -60,16 +48,16 @@ jobs:
       - name: Generate image tag
         id: generate-tag
         run: |
-          # Если есть версия в коммите - используем её
-          if [[ "${{ needs.check-version.outputs.has_version }}" == "true" ]]; then
-            VERSION="${{ needs.check-version.outputs.version }}"
-            echo "Using version from commit: $VERSION"
+          # Если это тег - используем имя тега (например v1.0.0)
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"  # Убираем refs/tags/
+            echo "Using tag version: $VERSION"
           else
-            # Иначе генерируем тэг из даты и SHA коммита
+            # Для коммитов в ветку - используем SHA коммита
             SHORT_SHA=$(git rev-parse --short HEAD)
             DATE=$(date +'%Y%m%d')
             VERSION="${DATE}-${SHORT_SHA}"
-            echo "Generated version: $VERSION"
+            echo "Generated version for branch commit: $VERSION"
           fi
           
           IMAGE_TAG="${{ env.IMAGE_NAME }}:$VERSION"
@@ -83,13 +71,15 @@ jobs:
           file: ./Dockerfile
           push: true
           tags: ${{ steps.generate-tag.outputs.IMAGE_TAG }}
+          labels: |
+            version=${{ steps.generate-tag.outputs.IMAGE_TAG }}
+            build.date=${{ github.event.head_commit.timestamp }}
+            commit.sha=${{ github.sha }}
 
   deploy:
     name: Deploy to Kubernetes
-    needs: 
-      - check-version
-      - build-and-push
-    if: needs.check-version.outputs.has_version == 'true'
+    needs: build-and-push
+    if: needs.build-and-push.outputs.is_tag_build == 'true'
     runs-on: ubuntu-latest
     
     steps:
@@ -107,13 +97,11 @@ jobs:
           echo "${{ secrets.KUBECONFIG }}" > ~/.kube/config
           chmod 600 ~/.kube/config
 
-      - name: Get version for deployment
-        id: get-version
+      - name: Get image tag from build job
+        id: get-image-tag
         run: |
-          VERSION="${{ needs.check-version.outputs.version }}"
-          IMAGE_TAG="${{ env.IMAGE_NAME }}:${VERSION}"
-          echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_OUTPUT
-          echo "Deploy image tag: ${IMAGE_TAG}"
+          echo "Using image tag: ${{ needs.build-and-push.outputs.image_tag }}"
+          echo "image_tag=${{ needs.build-and-push.outputs.image_tag }}" >> $GITHUB_OUTPUT
 
       - name: Create namespace if not exists
         run: |
@@ -131,7 +119,7 @@ jobs:
           
       - name: Apply Kubernetes manifests
         run: |
-          kubectl apply -f ./deployment-svc.yaml
+          kubectl apply -f ./deployment-svc.yaml -n ${{ env.NAMESPACE }}
           
       - name: Verify deployment
         run: |
